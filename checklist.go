@@ -19,28 +19,6 @@ type Checklist struct {
 	}
 }
 
-func (c *Checklist) AddFile(path, hash string) {
-	c.files = append(c.files, struct {
-		path string
-		hash string
-	}{path, hash})
-}
-
-func (c *Checklist) Collect(path string) error {
-	content, err := ioutil.ReadFile(path)
-	if err != nil {
-		return err
-	}
-
-	m := md5.New()
-	m.Write(content)
-
-	hash := hex.EncodeToString(m.Sum(nil))
-	c.AddFile(path, hash)
-
-	return nil
-}
-
 func ChecklistFromReader(in io.Reader) (*Checklist, error) {
 	checklist := &Checklist{}
 
@@ -75,6 +53,28 @@ func ChecklistFromDir(dir string, filter func(path string, info os.FileInfo) boo
 	}
 
 	return checklist, nil
+}
+
+func (c *Checklist) AddFile(path, hash string) {
+	c.files = append(c.files, struct {
+		path string
+		hash string
+	}{path, hash})
+}
+
+func (c *Checklist) Collect(path string) error {
+	content, err := ioutil.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	m := md5.New()
+	m.Write(content)
+
+	hash := hex.EncodeToString(m.Sum(nil))
+	c.AddFile(path, hash)
+
+	return nil
 }
 
 func (c *Checklist) Diff() (out []string, err error) {

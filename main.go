@@ -161,7 +161,7 @@ func (j *Journal) Lock() error {
 	// reset or re-rencrypt files
 	for _, file := j.Files {
 		if !hasChanged(file) {
-			file.Reset()
+			file.ResetFootprint()
 			continue
 		}
 
@@ -264,9 +264,8 @@ func (fp FilePair) RemoveFootprint() error {
 	return exec.Command("rm", path.Join(dirname, "."+basename)).Run()
 }
 
-func (fp FilePair) Reset() error {
+func (fp FilePair) ResetFootprint() error {
 	dirname := filepath.Dir(fp.enc)
 	basename := filepath.Base(fp.enc)
-
 	return exec.Command("mv", path.Join(dirname, "."+basename), fp.enc).Run()
 }
