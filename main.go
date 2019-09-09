@@ -149,7 +149,7 @@ func (j *Journal) Lock() error {
 		return fmt.Errorf("Could not calculate file changes: %s", err)
 	}
 	hasChanged := func(path string) bool {
-		for _, changed := changes {
+		for _, changed := range changes {
 			if path == changed {
 				return true
 			}
