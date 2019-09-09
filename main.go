@@ -3,13 +3,13 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/spf13/cobra"
 )
@@ -29,8 +29,15 @@ var (
 				log.Fatal(err)
 			}
 
-			journal.Unlock()
+			err = journal.Unlock()
+			if err != nil {
+				log.Fatal(err)
+			}
 		},
+	}
+
+	nonHiddenFilesFilter = func(path string, _ os.FileInfo) bool {
+		return strings.HasPrefix(filepath.Base(path), ".")
 	}
 )
 
@@ -49,7 +56,7 @@ var DefaultFileExt = ".gpg"
 
 type Journal struct {
 	RootDir string
-	Files   []FilePair
+	Files   []*FilePair
 
 	encryptedFileExt string
 	gpgCommand       string
@@ -63,7 +70,6 @@ func NewJournalFromArgs(args []string) (*Journal, error) {
 
 	journal := &Journal{
 		encryptedFileExt: DefaultFileExt,
-		gpgReceiver:      "",
 		gpgCommand:       "gpg",
 	}
 
@@ -79,6 +85,13 @@ func NewJournalFromArgs(args []string) (*Journal, error) {
 		}
 	}
 
+	gpgid, err := ioutil.ReadFile(path.Join(journal.RootDir, ".gpgid"))
+	if err != nil && os.IsNotExist(err) {
+		fmt.Println("Journal directory is not initialised. Run journal init.")
+		os.Exit(0)
+	}
+	journal.gpgReceiver = strings.TrimSpace(string(gpgid))
+
 	err = filepath.Walk(journal.RootDir, journal.walkFile)
 	if err != nil {
 		return nil, err
@@ -88,73 +101,58 @@ func NewJournalFromArgs(args []string) (*Journal, error) {
 }
 
 func (j *Journal) Unlock() error {
-	var (
-		decryptCh = make(chan FilePair, 10)
-		hashCh    = make(chan FilePair, 10)
-		chksumCh  = make(chan FilePair, 100)
-	)
-
-	wg := &sync.WaitGroup{}
-
-	// decrypt
-	go func() {
-		for fp := range decryptCh {
-			log.Printf("Decrypting %s", fp.enc)
-			if err := fp.Decrypt(j); err != nil {
-				fmt.Printf("Error decrypting file %s: %s", fp.enc, err)
-				os.Exit(1)
-			}
-			hashCh <- fp
+	for _, f := range j.Files {
+		if err := f.Decrypt(j); err != nil {
+			return fmt.Errrof("Error decrypting file %s: %s", f.enc, err)
 		}
-	}()
 
-	// hash
-	go func() {
-		for fp := range hashCh {
-			log.Printf("Hashing %s", fp.plain)
-			if err := fp.CalculateHash(j); err != nil {
-				fmt.Printf("Error calculating file hash %s: %s", fp.enc, err)
-				os.Exit(1)
-			}
-			chksumCh <- fp
+		if err := f.Footprint(); err != nil {
+			return fmt.Errorf("Error creating file footprint %s: %s", f.enc, err)
 		}
-	}()
+	}
 
-	chkFile, err := os.Create(path.Join(j.RootDir, ".check"))
+	checklist, err := ChecklistFromDir(j.RootDir, nonHiddenFilesFilter)
 	if err != nil {
-		fmt.Printf("Error opening checksum file for writing: %s", err)
-		os.Exit(1)
-	}
-	chkWriter := bufio.NewWriter(chkFile)
-
-	// write checksums
-	go func() {
-		for fp := range chksumCh {
-			chkWriter.Write(fp.plainHash)
-			wg.Done()
-		}
-	}()
-
-	// enqueue
-	wg.Add(len(j.Files))
-	for _, file := range j.Files {
-		decryptCh <- file
+		return fmt.Errorf("Error reading checklist from dir: %s", err)
 	}
 
-	wg.Wait()
-	chkWriter.Flush()
-	chkFile.Close()
+	checkfile, err := os.Create(path.Join(j.RootDir, ".check"))
+	if err != nil {
+		return fmt.Errorf("Error creating checklist file: %s", err)
+	}
+
+	checkWriter := bufio.NewWriter(checkfile)
+	if err := checklist.Write(checkWriter); err != nil {
+		return fmt.Errorf("Error writing checklist file: %s", err)
+	}
+	checkWriter.Flush()
+	checkfile.Close()
 
 	return nil
 }
 
 func (j *Journal) Lock() error {
+	checkfile, err := os.Open(path.Join(j.RootDir, ".check"))
+	if err != nil {
+		return fmt.Errorf("Could not find open checklist file: %s", err)
+	}
+	defer checkfile.Close()
+
+	checklist, err := ChecklistFromReader(bufio.NewReader(checkfile))
+	if err != nil {
+		return fmt.Errorf("Could not read from checklist file: %s", err)
+	}
+
+	// calculate which files have changed
+	changes, err := checklist.Diff()
+	if err != nil {
+		return fmt.Errorf("Could not calculate file changes: %s", err)
+	}
 
 	return nil
 }
 
 func (j *Journal) Status() error {
-
 	return nil
 }
 
@@ -174,13 +172,12 @@ func (j *Journal) walkFile(path string, info os.FileInfo, err error) error {
 }
 
 type FilePair struct {
-	enc       string
-	plain     string
-	plainHash []byte
+	enc   string
+	plain string
 }
 
-func NewFilePair(enc string, plain string) FilePair {
-	return FilePair{
+func NewFilePair(enc string, plain string) *FilePair {
+	return &FilePair{
 		enc:   enc,
 		plain: plain,
 	}
@@ -206,23 +203,6 @@ func (fp *FilePair) Decrypt(j *Journal) error {
 	return nil
 }
 
-func (fp *FilePair) CalculateHash(j *Journal) error {
-	// create an md5 checklist for the decrypted files
-	args := []string{
-		"-r",
-		fp.plain,
-	}
-
-	// TODO: read file and use go md5
-	out, err := exec.Command("md5", args...).Output()
-	if err != nil {
-		return err
-	}
-	fp.plainHash = out
-
-	return nil
-}
-
 func (fp *FilePair) Encrypt(j *Journal) error {
 	args := []string{
 		"-e",
@@ -241,4 +221,17 @@ func (fp *FilePair) Encrypt(j *Journal) error {
 	}
 
 	return nil
+}
+
+func (fp *FilePair) Footprint() error {
+	dirname := filepath.Dir(fp.enc)
+	basename := filepath.Base(fp.enc)
+	return exec.Command("mv", fp.enc, path.Join(dirname, "."+basename)).Run()
+}
+
+func (fp *FilePair) Reset() error {
+	dirname := filepath.Dir(fp.enc)
+	basename := filepath.Base(fp.enc)
+
+	return exec.Command("mv", path.Join(dirname, "."+basename), fp.enc).Run()
 }
