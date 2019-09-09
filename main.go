@@ -56,7 +56,7 @@ var DefaultFileExt = ".gpg"
 
 type Journal struct {
 	RootDir string
-	Files   []*FilePair
+	Files   []FilePair
 
 	encryptedFileExt string
 	gpgCommand       string
@@ -106,7 +106,7 @@ func (j *Journal) Unlock() error {
 			return fmt.Errrof("Error decrypting file %s: %s", f.enc, err)
 		}
 
-		if err := f.Footprint(); err != nil {
+		if err := f.LeaveFootprint(); err != nil {
 			return fmt.Errorf("Error creating file footprint %s: %s", f.enc, err)
 		}
 	}
@@ -148,6 +148,31 @@ func (j *Journal) Lock() error {
 	if err != nil {
 		return fmt.Errorf("Could not calculate file changes: %s", err)
 	}
+	hasChanged := func(path string) bool {
+		for _, changed := changes {
+			if path == changed {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	// reset or re-rencrypt files
+	for _, file := j.Files {
+		if !hasChanged(file) {
+			file.Reset()
+			continue
+		}
+
+		if err := file.Encrypt(j); err != nil {
+			return err
+		}
+
+		if err := file.RemoveFootprint(); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
@@ -165,25 +190,29 @@ func (j *Journal) walkFile(path string, info os.FileInfo, err error) error {
 		return nil
 	}
 
-	fp := NewFilePair(path, strings.TrimSuffix(path, j.encryptedFileExt))
+	hidden := strings.HasPrefix(filepath.Base(path), ".")
+	raw := path.Join(
+		filepath.Dir(path),
+		strings.TrimPrefix(".", filepath.Base(path)),
+	)
 
-	j.Files = append(j.Files, fp)
+	file := FilePair{
+		enc:    path,
+		plain:  strings.TrimSuffix(path, j.encryptedFileExt),
+		hidden: hidden,
+	}
+
+	j.Files = append(j.Files, file)
 	return nil
 }
 
 type FilePair struct {
-	enc   string
-	plain string
+	enc    string
+	plain  string
+	hidden bool
 }
 
-func NewFilePair(enc string, plain string) *FilePair {
-	return &FilePair{
-		enc:   enc,
-		plain: plain,
-	}
-}
-
-func (fp *FilePair) Decrypt(j *Journal) error {
+func (fp FilePair) Decrypt(j *Journal) error {
 	args := []string{
 		"-d",
 		"--batch", // non-interactive
@@ -203,7 +232,7 @@ func (fp *FilePair) Decrypt(j *Journal) error {
 	return nil
 }
 
-func (fp *FilePair) Encrypt(j *Journal) error {
+func (fp FilePair) Encrypt(j *Journal) error {
 	args := []string{
 		"-e",
 		"--batch", // non-interactive
@@ -223,13 +252,19 @@ func (fp *FilePair) Encrypt(j *Journal) error {
 	return nil
 }
 
-func (fp *FilePair) Footprint() error {
+func (fp FilePair) LeaveFootprint() error {
 	dirname := filepath.Dir(fp.enc)
 	basename := filepath.Base(fp.enc)
 	return exec.Command("mv", fp.enc, path.Join(dirname, "."+basename)).Run()
 }
 
-func (fp *FilePair) Reset() error {
+func (fp FilePair) RemoveFootprint() error {
+	dirname := filepath.Dir(fp.enc)
+	basename := filepath.Base(fp.enc)
+	return exec.Command("rm", path.Join(dirname, "."+basename)).Run()
+}
+
+func (fp FilePair) Reset() error {
 	dirname := filepath.Dir(fp.enc)
 	basename := filepath.Base(fp.enc)
 
